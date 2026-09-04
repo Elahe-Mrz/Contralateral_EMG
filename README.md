@@ -13,12 +13,14 @@ commands below at its `Raw/`, `Preprocessed/`, or HDF5 release root.
   synchronized table from the raw release. It never changes its input root.
 * `preprocessing/trim_preprocessed_publication.py` — applies the documented
   final shared-coverage trimming to a separate output root.
-* `preprocessing/convert_synced_csv_to_hdf5.py` — losslessly converts each
-  `synced_data.csv` numeric table to compressed HDF5.
-* `preprocessing/append_native_processed_csvs_to_hdf5.py` — adds the native
-  processed modality tables to the matching HDF5 take file.
 * `load_release.py` — loads synchronized or native processed data from CSV or
   HDF5 into pandas DataFrames.
+* `tutorials/load_and_visualize_hdf5.py` — loads one released HDF5 take and
+  plots synchronized sEMG, joint-angle, and fingertip-force signals.
+* `analysis/emg_ridge_session_baseline.py` — implements the reported causal
+  500-ms sEMG features and participant-specific ridge-regression validation.
+* `docs/hdf5_structure.md` and `docs/data_dictionary.csv` — describe the
+  deposited HDF5 layout and variables.
 
 ## Installation
 
@@ -68,7 +70,7 @@ byte-identical to their text serialization.
 The final data-release curation retains the canonical offline-retargeted angle
 table and excludes standard online-angle provenance derivatives.
 
-## Reproduce the processed release
+## Preprocess the raw CSV release
 
 All commands write to an explicitly separate output directory. Run the main
 preprocessing script first, then the trimming script. Exact input/output paths,
@@ -84,16 +86,29 @@ python preprocessing/trim_preprocessed_publication.py \
   --output-root /path/to/Preprocessed --apply
 ```
 
-To make a compact HDF5 representation of the final processed release:
+The deposited HDF5 files are the official analysis-ready representation. The
+CSV-to-HDF5 packaging utility is retained as internal release-engineering code;
+it is not needed to load or analyze the deposited data.
 
 ```bash
-python preprocessing/convert_synced_csv_to_hdf5.py \
-  --input-root /path/to/Preprocessed --output-root /path/to/hdf5 \
-  --verify --apply
+python tutorials/load_and_visualize_hdf5.py \
+  /path/to/hdf5/P001/Power/<take>.h5 \
+  --start-s 0 --duration-s 15 --output example.png
+```
 
-python preprocessing/append_native_processed_csvs_to_hdf5.py \
-  --input-root /path/to/Preprocessed --hdf5-root /path/to/hdf5 \
-  --verify --apply
+## Technical-validation baseline
+
+The ridge script contains the exact feature definitions used in the paper:
+RMS, mean absolute value, waveform length, and zero crossings from a causal
+500-ms window. It fits participant-specific multi-output models and holds out
+one complete take from each gesture in every fold. P007 EMG channel 7 is
+excluded consistently by the documented default. Run it on the synchronized
+CSV tree recreated by the preprocessing workflow:
+
+```bash
+python analysis/emg_ridge_session_baseline.py \
+  --data-root /path/to/Preprocessed \
+  --output /path/to/baseline_results
 ```
 
 ## Citation and data access
