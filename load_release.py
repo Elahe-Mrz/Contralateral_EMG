@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load synchronized and native processed dataset tables from CSV or HDF5.
+"""Load or export synchronized and native processed CSV/HDF5 tables.
 
 The HDF5 layout is created by the scripts in ``preprocessing/``.  The returned
 DataFrames reproduce the parsed table values and their original column order.
@@ -61,17 +61,38 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path, help="CSV or HDF5 take file")
     parser.add_argument("--native", help="Native HDF5 modality name; omit for synchronized data")
+    parser.add_argument("--list-native", action="store_true",
+                        help="List native modality group names in an HDF5 file and exit")
+    parser.add_argument("--output-csv", type=Path,
+                        help="Optionally export the loaded table to this CSV path")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Allow replacement of an existing --output-csv file")
     args = parser.parse_args()
+    is_hdf5 = args.path.suffix.lower() in {".h5", ".hdf5"}
+    if args.list_native:
+        if not is_hdf5:
+            parser.error("--list-native requires HDF5 input")
+        print("\n".join(list_native_modalities(args.path)))
+        return
     if args.path.suffix.lower() == ".csv":
         if args.native:
             parser.error("--native is only valid for HDF5 input")
         frame = load_synced_csv(args.path)
-    elif args.path.suffix.lower() in {".h5", ".hdf5"}:
+    elif is_hdf5:
         frame = load_native_hdf5(args.path, args.native) if args.native else load_synced_hdf5(args.path)
     else:
         parser.error("path must end in .csv, .h5, or .hdf5")
     print(f"rows={len(frame)} columns={len(frame.columns)}")
     print("\n".join(frame.columns))
+    if args.output_csv:
+        output = args.output_csv.resolve()
+        if output.exists() and not args.overwrite:
+            raise FileExistsError(f"Refusing to replace {output}; use --overwrite")
+        if output == args.path.resolve():
+            raise ValueError("--output-csv must differ from the input path")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        frame.to_csv(output, index=False)
+        print(f"Wrote {output}")
 
 
 if __name__ == "__main__":

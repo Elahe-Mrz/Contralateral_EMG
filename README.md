@@ -62,6 +62,30 @@ print(list_native_modalities(path))
 emg = load_native_hdf5(path, "emg_<take>_2000Hz_preprocessed")
 ```
 
+List the native modality names stored in a take:
+
+```bash
+python load_release.py /path/to/take.h5 --list-native
+```
+
+Export the synchronized HDF5 table to CSV:
+
+```bash
+python load_release.py /path/to/take.h5 \
+  --output-csv /path/to/exported_synced_data.csv
+```
+
+Export one native processed modality by using a group name returned by
+`--list-native`:
+
+```bash
+python load_release.py /path/to/take.h5 \
+  --native "emg_<take>_2000Hz_preprocessed" \
+  --output-csv /path/to/exported_emg.csv
+```
+
+Existing CSV outputs are not replaced unless `--overwrite` is supplied.
+
 The HDF5 representation stores parsed numeric values as `float64`, preserves
 column order and missing values, and uses gzip plus shuffle compression without
 downcasting. It is lossless with respect to the parsed CSV tables, rather than
