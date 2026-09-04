@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Participant-specific causal sEMG ridge baseline with gesture-stratified take holdout.
 
-The baseline answers whether the released timestamp-aligned sEMG contains
+The baseline reads the released HDF5 representation directly or a recreated
+synchronized CSV tree. It answers whether the timestamp-aligned sEMG contains
 information about continuous retargeted angles and fingertip forces. It uses
 only causal sEMG features from each prediction time and never splits windows
 randomly: each fold holds out one complete take of each gesture for one
@@ -26,8 +27,8 @@ other twelve takes from that participant.
 Example
 -------
 python emg_ridge_session_baseline.py \
-  --data-root Preprocessed \
-  --output baseline_emg_ridge_session_20260826
+  --data-root /path/to/hdf5 --data-format hdf5 \
+  --output baseline_emg_ridge_results
 """
 from __future__ import annotations
 
@@ -41,6 +42,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import h5py
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -55,11 +57,14 @@ class TakeInfo:
     gesture: str
     take: str
     path: Path
+    storage_format: str
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, required=True)
+    parser.add_argument("--data-format", choices=("auto", "csv", "hdf5"), default="auto",
+                        help="Input representation. Auto requires the root to contain only one representation.")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--window-ms", type=float, default=500.0)
     parser.add_argument("--stride-ms", type=float, default=50.0,
@@ -81,21 +86,64 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def discover_takes(root: Path, participants: set[str], selected_takes: set[str]) -> list[TakeInfo]:
+def discover_takes(root: Path, participants: set[str], selected_takes: set[str],
+                   data_format: str) -> list[TakeInfo]:
     takes: list[TakeInfo] = []
-    for synced in sorted(root.rglob("synced_data.csv")):
-        relative = synced.relative_to(root)
-        if len(relative.parts) < 4:
-            continue
-        participant, gesture, take = relative.parts[:3]
+    csv_files = sorted(root.rglob("synced_data.csv"))
+    hdf5_files = sorted((*root.rglob("*.h5"), *root.rglob("*.hdf5")))
+    if data_format == "auto":
+        available_formats = [name for name, paths in (("csv", csv_files), ("hdf5", hdf5_files)) if paths]
+        if len(available_formats) != 1:
+            raise ValueError(
+                f"--data-format auto found {available_formats or 'no supported data'}; "
+                "select --data-format csv or hdf5 explicitly"
+            )
+        data_format = available_formats[0]
+    paths = csv_files if data_format == "csv" else hdf5_files
+    for source in paths:
+        relative = source.relative_to(root)
+        if data_format == "csv":
+            if len(relative.parts) < 4:
+                continue
+            participant, gesture, take = relative.parts[:3]
+        else:
+            if len(relative.parts) < 3:
+                continue
+            participant, gesture, take = relative.parts[0], relative.parts[1], source.stem
+        take_key = Path(participant, gesture, take).as_posix()
         if participants and participant not in participants:
             continue
-        if selected_takes and relative.parent.as_posix() not in selected_takes:
+        if selected_takes and take_key not in selected_takes:
             continue
-        takes.append(TakeInfo(participant, gesture, relative.parent.as_posix(), synced))
+        takes.append(TakeInfo(participant, gesture, take_key, source, data_format))
     if not takes:
-        raise FileNotFoundError(f"No synchronized takes found below {root}")
+        raise FileNotFoundError(f"No synchronized {data_format} takes found below {root}")
     return takes
+
+
+def table_columns(path: Path) -> list[str]:
+    if path.suffix.lower() == ".csv":
+        return pd.read_csv(path, nrows=0).columns.tolist()
+    with h5py.File(path, "r") as handle:
+        return [value.decode("utf-8") if isinstance(value, bytes) else str(value)
+                for value in handle["columns"][:]]
+
+
+def read_columns(path: Path, columns: list[str]) -> pd.DataFrame:
+    """Read selected synchronized columns from CSV or the released HDF5 layout."""
+    if path.suffix.lower() == ".csv":
+        return pd.read_csv(path, usecols=columns)
+    with h5py.File(path, "r") as handle:
+        stored_columns = [value.decode("utf-8") if isinstance(value, bytes) else str(value)
+                          for value in handle["columns"][:]]
+        missing = [column for column in columns if column not in stored_columns]
+        if missing:
+            raise KeyError(f"missing HDF5 columns: {missing}")
+        requested = [(stored_columns.index(column), column) for column in columns]
+        ordered = sorted(requested)
+        values = handle["data"][:, [index for index, _ in ordered]]
+        frame = pd.DataFrame(values, columns=[column for _, column in ordered])
+        return frame.loc[:, columns]
 
 
 def prefix_sum(values: np.ndarray) -> np.ndarray:
@@ -153,7 +201,7 @@ def inverse_force(force: np.ndarray, kind: str) -> np.ndarray:
 
 def load_take(info: TakeInfo, window_ms: float, stride_ms: float, force_transform: str,
               include_imu: bool, excluded_emg: set[str]) -> tuple[np.ndarray, np.ndarray, tuple[str, ...], tuple[str, ...], dict[str, object]]:
-    available = set(pd.read_csv(info.path, nrows=0).columns)
+    available = set(table_columns(info.path))
     emg_columns = tuple(column for column in EMG_COLUMNS if column in available and column not in excluded_emg)
     imu_columns = tuple(sorted(column for column in available if column.startswith("IMU "))) if include_imu else ()
     if not emg_columns:
@@ -165,7 +213,7 @@ def load_take(info: TakeInfo, window_ms: float, stride_ms: float, force_transfor
     if missing:
         raise ValueError(f"required columns missing: {missing}")
     columns = ["timestamp", *emg_columns, *imu_columns, *ANGLE_COLUMNS, *FORCE_COLUMNS]
-    frame = pd.read_csv(info.path, usecols=columns)
+    frame = read_columns(info.path, columns)
     time = pd.to_numeric(frame["timestamp"], errors="coerce").to_numpy(np.float64)
     finite_time = time[np.isfinite(time)]
     if len(finite_time) < 2:
@@ -188,6 +236,7 @@ def load_take(info: TakeInfo, window_ms: float, stride_ms: float, force_transfor
     valid = imu_valid & np.isfinite(features).all(axis=1) & np.isfinite(targets).all(axis=1)
     inventory = {
         "participant": info.participant, "gesture": info.gesture, "take_folder": info.take,
+        "storage_format": info.storage_format,
         "file": str(info.path), "emg_channels": ";".join(emg_columns), "emg_channel_count": len(emg_columns),
         "imu_channels": ";".join(imu_columns), "imu_channel_count": len(imu_columns),
         "sampling_hz": fs_hz, "window_samples": window,
@@ -251,7 +300,7 @@ def main() -> None:
         shutil.rmtree(output)
     output.mkdir(parents=True)
     emg_exclusions = parse_emg_exclusions(args.exclude_emg_channel)
-    takes = discover_takes(root, set(args.participant), set(args.take))
+    takes = discover_takes(root, set(args.participant), set(args.take), args.data_format)
     data: dict[str, dict[str, list[tuple[str, np.ndarray, np.ndarray]]]] = defaultdict(lambda: defaultdict(list))
     participant_emg_channels: dict[str, tuple[str, ...]] = {}
     participant_imu_channels: dict[str, tuple[str, ...]] = {}
@@ -383,7 +432,7 @@ def main() -> None:
             pearson_r_mean=("pearson_r_mean", "mean"), pearson_r_median=("pearson_r_median", "median"),
         )
         participant_equal_summary.to_csv(output / "held_out_take_summary_by_output_equal_participant.csv", index=False)
-    config = {"data_root": str(root), "window_ms": args.window_ms, "stride_ms": args.stride_ms, "alpha": args.alpha, "force_transform": args.force_transform, "force_prediction_constraint": "predictions clipped to >= 0 N for evaluation", "emg_feature_order": ["RMS", "MAV", "waveform_length", "zero_crossings"], "include_imu": args.include_imu, "imu_feature_order": ["mean", "standard_deviation"] if args.include_imu else [], "emg_channel_policy": "participant-specific channels present consistently across that participant's takes after documented exclusions", "excluded_emg_channels_by_participant": {participant: sorted(channels) for participant, channels in sorted(emg_exclusions.items())}, "emg_channels_by_participant": {participant: list(channels) for participant, channels in sorted(participant_emg_channels.items())}, "imu_channel_policy": "participant-specific channels present consistently across that participant's takes" if args.include_imu else "not used", "imu_channels_by_participant": {participant: list(channels) for participant, channels in sorted(participant_imu_channels.items())}, "evaluation_protocol": "participant-specific leave-one-take-per-gesture-out; each fold holds one Pinch, one Power, and one Spherical take out together", "primary_metric_scope": "concatenated three-take held-out fold; reported in fold_metrics.csv and summary_by_output.csv", "secondary_metric_scope": "each held-out take evaluated separately, then averaged equally within participant; reported in held_out_take_metrics.csv and held_out_take_summary_by_output_equal_participant.csv", "angle_targets": list(ANGLE_COLUMNS), "force_targets": list(FORCE_COLUMNS), "take_count_discovered": len(takes), "takes_loaded": len(inventory), "load_failures": len(failures), "participants_with_evaluable_take_folds": int(sum(row["eligible_for_leave_one_take_per_gesture_out"] for row in eligibility)), "fold_count": len({(row["participant"], row["held_out_fold"]) for row in fold_rows})}
+    config = {"data_root": str(root), "requested_data_format": args.data_format, "loaded_storage_formats": sorted({row["storage_format"] for row in inventory}), "window_ms": args.window_ms, "stride_ms": args.stride_ms, "alpha": args.alpha, "force_transform": args.force_transform, "force_prediction_constraint": "predictions clipped to >= 0 N for evaluation", "emg_feature_order": ["RMS", "MAV", "waveform_length", "zero_crossings"], "include_imu": args.include_imu, "imu_feature_order": ["mean", "standard_deviation"] if args.include_imu else [], "emg_channel_policy": "participant-specific channels present consistently across that participant's takes after documented exclusions", "excluded_emg_channels_by_participant": {participant: sorted(channels) for participant, channels in sorted(emg_exclusions.items())}, "emg_channels_by_participant": {participant: list(channels) for participant, channels in sorted(participant_emg_channels.items())}, "imu_channel_policy": "participant-specific channels present consistently across that participant's takes" if args.include_imu else "not used", "imu_channels_by_participant": {participant: list(channels) for participant, channels in sorted(participant_imu_channels.items())}, "evaluation_protocol": "participant-specific leave-one-take-per-gesture-out; each fold holds one Pinch, one Power, and one Spherical take out together", "primary_metric_scope": "concatenated three-take held-out fold; reported in fold_metrics.csv and summary_by_output.csv", "secondary_metric_scope": "each held-out take evaluated separately, then averaged equally within participant; reported in held_out_take_metrics.csv and held_out_take_summary_by_output_equal_participant.csv", "angle_targets": list(ANGLE_COLUMNS), "force_targets": list(FORCE_COLUMNS), "take_count_discovered": len(takes), "takes_loaded": len(inventory), "load_failures": len(failures), "participants_with_evaluable_take_folds": int(sum(row["eligible_for_leave_one_take_per_gesture_out"] for row in eligibility)), "fold_count": len({(row["participant"], row["held_out_fold"]) for row in fold_rows})}
     (output / "run_config.json").write_text(json.dumps(config, indent=2) + "\n")
     print(json.dumps(config, indent=2))
 

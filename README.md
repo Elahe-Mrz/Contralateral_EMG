@@ -1,20 +1,23 @@
 # Contralateral EMG data-release code
 
-This repository contains the reproducible preprocessing and data-loading code
-for the contralateral upper-limb multimodal dataset.
+This repository contains preprocessing, loading, visualization, feature
+extraction, and technical-validation code for the contralateral upper-limb
+multimodal dataset.
 
-It contains no participant data. Obtain the release separately, then point the
-commands below at its `Raw/`, `Preprocessed/`, or HDF5 release root.
+It contains no participant data. The associated deposit provides the original
+recordings as CSV files under `Raw/` and the analysis-ready data as one HDF5
+file per take. Most users should work directly with the HDF5 files.
 
 ## Contents
 
 * `preprocessing/preprocess_publication_data.py` — creates native-rate
   processed sEMG, IMU, force, and offline-retargeted-angle tables and a
-  synchronized table from the raw release. It never changes its input root.
+  synchronized CSV table from `Raw/`. It never changes its input root.
 * `preprocessing/trim_preprocessed_publication.py` — applies the documented
-  final shared-coverage trimming to a separate output root.
-* `load_release.py` — loads synchronized or native processed data from CSV or
-  HDF5 into pandas DataFrames.
+  shared-coverage window and writes the final trimmed CSV derivative to a
+  separate output root.
+* `load_release.py` — lists, loads, or exports synchronized and native
+  processed HDF5 tables as pandas DataFrames or CSV files.
 * `tutorials/load_and_visualize_hdf5.py` — loads one released HDF5 take and
   plots synchronized sEMG, joint-angle, and fingertip-force signals.
 * `analysis/emg_ridge_session_baseline.py` — implements the reported causal
@@ -28,21 +31,19 @@ commands below at its `Raw/`, `Preprocessed/`, or HDF5 release root.
 python -m pip install -r requirements.txt
 ```
 
-Python 3.10 or later is recommended.
+The pinned environment was tested with Python 3.10.18.
+
+## Quick start: released HDF5 data
+
+Inspect one file and list its native-rate modality groups:
+
+```bash
+python load_release.py /path/to/take.h5 --list-native
+```
 
 ## Load one synchronized take
 
-CSV:
-
-```python
-from load_release import load_synced_csv
-
-frame = load_synced_csv(
-    "/path/to/Release/Preprocessed/P001/Pinch/<take>/synced_data.csv"
-)
-```
-
-HDF5:
+Load the synchronized HDF5 table:
 
 ```python
 from load_release import load_synced_hdf5
@@ -50,6 +51,15 @@ from load_release import load_synced_hdf5
 frame = load_synced_hdf5(
     "/path/to/hdf5/P001/Pinch/<take>.h5"
 )
+```
+
+The preprocessing workflow described below can also recreate synchronized CSV
+tables. Those tables can be loaded with:
+
+```python
+from load_release import load_synced_csv
+
+frame = load_synced_csv("/path/to/recreated/synced_data.csv")
 ```
 
 Load a native processed modality from HDF5:
@@ -60,12 +70,6 @@ from load_release import list_native_modalities, load_native_hdf5
 path = "/path/to/hdf5/P001/Pinch/<take>.h5"
 print(list_native_modalities(path))
 emg = load_native_hdf5(path, "emg_<take>_2000Hz_preprocessed")
-```
-
-List the native modality names stored in a take:
-
-```bash
-python load_release.py /path/to/take.h5 --list-native
 ```
 
 Export the synchronized HDF5 table to CSV:
@@ -94,25 +98,7 @@ byte-identical to their text serialization.
 The final data-release curation retains the canonical offline-retargeted angle
 table and excludes standard online-angle provenance derivatives.
 
-## Preprocess the raw CSV release
-
-All commands write to an explicitly separate output directory. Run the main
-preprocessing script first, then the trimming script. Exact input/output paths,
-participants, and special documented corrections are recorded in the release
-provenance files.
-
-```bash
-python preprocessing/preprocess_publication_data.py \
-  /path/to/Raw --output-root /path/to/preprocessed
-
-python preprocessing/trim_preprocessed_publication.py \
-  --input-root /path/to/preprocessed \
-  --output-root /path/to/Preprocessed --apply
-```
-
-The deposited HDF5 files are the official analysis-ready representation. The
-CSV-to-HDF5 packaging utility is retained as internal release-engineering code;
-it is not needed to load or analyze the deposited data.
+Create a synchronized multimodal plot directly from one released HDF5 file:
 
 ```bash
 python tutorials/load_and_visualize_hdf5.py \
@@ -120,20 +106,78 @@ python tutorials/load_and_visualize_hdf5.py \
   --start-s 0 --duration-s 15 --output example.png
 ```
 
+## Preprocess the raw CSV release
+
+This workflow is provided for users who want to reproduce processing from the
+raw CSV release. It is not required when using the deposited HDF5 files. Both
+stages write to explicitly separate output roots and never modify `Raw/`.
+
+The publication profile applies:
+
+* sEMG detrending, 20--450 Hz band-pass filtering, a 60 Hz notch, and
+  conservative isolated-spike repair;
+* force baseline correction, 100-ms median filtering, 5-Hz low-pass filtering,
+  non-negative clipping, and a small adaptive zero deadband;
+* 200-ms median and 5-Hz low-pass filtering of offline-retargeted angles;
+* 20-Hz low-pass filtering of accelerometer/gyroscope channels and 10-Hz
+  low-pass filtering of magnetometer channels without removing physical DC;
+* timestamp synchronization to the nominal 2-kHz sEMG grid, with bounded
+  interpolation and no extrapolation beyond observed coverage.
+
+First create the full processed CSV tree:
+
+```bash
+python preprocessing/preprocess_publication_data.py \
+  /path/to/Raw --output-root /path/to/preprocessed
+```
+
+Then select the documented shared-coverage windows. Online-angle timing is used
+when determining shared coverage, but `--exclude-online-output` prevents that
+non-canonical derivative from being copied into the final output:
+
+```bash
+python preprocessing/trim_preprocessed_publication.py \
+  --input-root /path/to/preprocessed \
+  --output-root /path/to/final_processed_csv \
+  --exclude-online-output --apply
+```
+
+Each stage writes JSON/CSV provenance reports alongside its outputs. The
+deposited HDF5 files are the official compact representation; HDF5 packaging is
+an internal release-engineering operation rather than a scientific processing
+step.
+
 ## Technical-validation baseline
 
 The ridge script contains the exact feature definitions used in the paper:
 RMS, mean absolute value, waveform length, and zero crossings from a causal
 500-ms window. It fits participant-specific multi-output models and holds out
 one complete take from each gesture in every fold. P007 EMG channel 7 is
-excluded consistently by the documented default. Run it on the synchronized
-CSV tree recreated by the preprocessing workflow:
+excluded consistently by the documented default. The script reads either the
+released HDF5 tree directly or synchronized CSV files recreated by the
+preprocessing workflow.
+
+Run it directly on the HDF5 deposit:
 
 ```bash
 python analysis/emg_ridge_session_baseline.py \
-  --data-root /path/to/Preprocessed \
+  --data-root /path/to/hdf5 \
+  --data-format hdf5 \
   --output /path/to/baseline_results
 ```
+
+Use `--data-format csv` for a recreated synchronized CSV tree. With `auto`, the
+script accepts a root containing exactly one of those representations.
+
+The output directory contains:
+
+* `fold_metrics.csv` and `summary_by_output.csv` for the primary concatenated
+  three-take held-out evaluation;
+* `held_out_take_metrics.csv` and
+  `held_out_take_summary_by_output_equal_participant.csv` for separately
+  evaluated held-out takes;
+* participant-level summaries, take eligibility, window inventory, loading
+  failures, and `run_config.json` with the complete analysis settings.
 
 ## Citation and data access
 

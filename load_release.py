@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Load or export synchronized and native processed CSV/HDF5 tables.
 
-The HDF5 layout is created by the scripts in ``preprocessing/``.  The returned
-DataFrames reproduce the parsed table values and their original column order.
+The returned DataFrames reproduce the parsed table values and their original
+column order.
 """
 from __future__ import annotations
 

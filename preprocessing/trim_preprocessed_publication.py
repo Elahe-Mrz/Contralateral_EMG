@@ -60,6 +60,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite-existing", action="store_true", help="Allow replacement of selected existing output files; requires --take.")
     parser.add_argument("--report-suffix", default="selected_retrim", help="Suffix for selected-take report files.")
     parser.add_argument("--update-master-manifest", action="store_true", help="Merge selected applied take rows into the dataset-wide trim manifests.")
+    parser.add_argument("--exclude-online-output", action="store_true",
+                        help="Use online-angle coverage when selecting the shared window but do not copy that non-canonical derivative to the output.")
     return parser.parse_args()
 
 
@@ -236,6 +238,8 @@ def main() -> int:
         keep_start, keep_end, rule, note = select_window(take_key, shared_start, shared_end)
         take_reports.append({"take_folder": take_key, "shared_start_s": shared_start, "shared_end_s": shared_end, "shared_duration_s": shared_end - shared_start, "keep_start_s": keep_start, "keep_end_s": keep_end, "target_duration_s": keep_end - keep_start, "rule": rule, "note": note})
         for kind, source in files.items():
+            if kind == "online_angles" and args.exclude_online_output:
+                continue
             time_col, input_start, input_end = bounds[kind]
             destination = output_root / relative / source.name
             report: dict[str, object] = {"take_folder": take_key, "kind": kind, "input_file": str(source), "output_file": str(destination), "time_column": time_col, "input_start_s": input_start, "input_end_s": input_end, "input_duration_s": input_end - input_start, "keep_start_s": keep_start, "keep_end_s": keep_end, "rule": rule, "note": note}
@@ -253,7 +257,7 @@ def main() -> int:
     with (report_root / f"trim_file_report{suffix}.csv").open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(file_reports[0]))
         writer.writeheader(); writer.writerows(file_reports)
-    metadata = {"input_root": str(input_root), "output_root": str(output_root), "target_seconds": TARGET_SECONDS, "long_overlap_seconds": LONG_OVERLAP_SECONDS, "default_initial_rest_seconds": DEFAULT_INITIAL_REST_SECONDS, "manual_exceptions": {key: {"kind": value.kind, "value_s": value.value_s, "note": value.note} for key, value in EXCEPTIONS.items()}, "apply": bool(args.apply), "take_count": len(take_reports)}
+    metadata = {"input_root": str(input_root), "output_root": str(output_root), "target_seconds": TARGET_SECONDS, "long_overlap_seconds": LONG_OVERLAP_SECONDS, "default_initial_rest_seconds": DEFAULT_INITIAL_REST_SECONDS, "manual_exceptions": {key: {"kind": value.kind, "value_s": value.value_s, "note": value.note} for key, value in EXCEPTIONS.items()}, "online_angle_coverage_used": True, "online_angle_output_included": not args.exclude_online_output, "apply": bool(args.apply), "take_count": len(take_reports)}
     (report_root / f"trimming_provenance{suffix}.json").write_text(json.dumps(metadata, indent=2) + "\n")
     if args.update_master_manifest:
         merge_master_report(output_root / "trim_manifest.csv", take_reports, "take_folder")
